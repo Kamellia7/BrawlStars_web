@@ -1,295 +1,244 @@
+"""Extensions to the 'distutils' for large or complex distributions"""
+
+from fnmatch import fnmatchcase
 import functools
+import os
 import re
-import string
-import typing as t
 
-if t.TYPE_CHECKING:
-    import typing_extensions as te
+import _distutils_hack.override  # noqa: F401
 
-    class HasHTML(te.Protocol):
-        def __html__(self) -> str:
-            pass
+import distutils.core
+from distutils.errors import DistutilsOptionError
+from distutils.util import convert_path
 
+from ._deprecation_warning import SetuptoolsDeprecationWarning
 
-__version__ = "2.1.1"
-
-_strip_comments_re = re.compile(r"<!--.*?-->")
-_strip_tags_re = re.compile(r"<.*?>")
-
-
-def _simple_escaping_wrapper(name: str) -> t.Callable[..., "Markup"]:
-    orig = getattr(str, name)
-
-    @functools.wraps(orig)
-    def wrapped(self: "Markup", *args: t.Any, **kwargs: t.Any) -> "Markup":
-        args = _escape_argspec(list(args), enumerate(args), self.escape)  # type: ignore
-        _escape_argspec(kwargs, kwargs.items(), self.escape)
-        return self.__class__(orig(self, *args, **kwargs))
-
-    return wrapped
+import setuptools.version
+from setuptools.extension import Extension
+from setuptools.dist import Distribution
+from setuptools.depends import Require
+from . import monkey
+from . import logging
 
 
-class Markup(str):
-    """A string that is ready to be safely inserted into an HTML or XML
-    document, either because it was escaped or because it was marked
-    safe.
+__all__ = [
+    'setup',
+    'Distribution',
+    'Command',
+    'Extension',
+    'Require',
+    'SetuptoolsDeprecationWarning',
+    'find_packages',
+    'find_namespace_packages',
+]
 
-    Passing an object to the constructor converts it to text and wraps
-    it to mark it safe without escaping. To escape the text, use the
-    :meth:`escape` class method instead.
+__version__ = setuptools.version.__version__
 
-    >>> Markup("Hello, <em>World</em>!")
-    Markup('Hello, <em>World</em>!')
-    >>> Markup(42)
-    Markup('42')
-    >>> Markup.escape("Hello, <em>World</em>!")
-    Markup('Hello &lt;em&gt;World&lt;/em&gt;!')
+bootstrap_install_from = None
 
-    This implements the ``__html__()`` interface that some frameworks
-    use. Passing an object that implements ``__html__()`` will wrap the
-    output of that method, marking it safe.
 
-    >>> class Foo:
-    ...     def __html__(self):
-    ...         return '<a href="/foo">foo</a>'
-    ...
-    >>> Markup(Foo())
-    Markup('<a href="/foo">foo</a>')
-
-    This is a subclass of :class:`str`. It has the same methods, but
-    escapes their arguments and returns a ``Markup`` instance.
-
-    >>> Markup("<em>%s</em>") % ("foo & bar",)
-    Markup('<em>foo &amp; bar</em>')
-    >>> Markup("<em>Hello</em> ") + "<foo>"
-    Markup('<em>Hello</em> &lt;foo&gt;')
+class PackageFinder:
+    """
+    Generate a list of all Python packages found within a directory
     """
 
-    __slots__ = ()
+    @classmethod
+    def find(cls, where='.', exclude=(), include=('*',)):
+        """Return a list all Python packages found within directory 'where'
 
-    def __new__(
-        cls, base: t.Any = "", encoding: t.Optional[str] = None, errors: str = "strict"
-    ) -> "Markup":
-        if hasattr(base, "__html__"):
-            base = base.__html__()
+        'where' is the root directory which will be searched for packages.  It
+        should be supplied as a "cross-platform" (i.e. URL-style) path; it will
+        be converted to the appropriate local path syntax.
 
-        if encoding is None:
-            return super().__new__(cls, base)
+        'exclude' is a sequence of package names to exclude; '*' can be used
+        as a wildcard in the names, such that 'foo.*' will exclude all
+        subpackages of 'foo' (but not 'foo' itself).
 
-        return super().__new__(cls, base, encoding, errors)
-
-    def __html__(self) -> "Markup":
-        return self
-
-    def __add__(self, other: t.Union[str, "HasHTML"]) -> "Markup":
-        if isinstance(other, str) or hasattr(other, "__html__"):
-            return self.__class__(super().__add__(self.escape(other)))
-
-        return NotImplemented
-
-    def __radd__(self, other: t.Union[str, "HasHTML"]) -> "Markup":
-        if isinstance(other, str) or hasattr(other, "__html__"):
-            return self.escape(other).__add__(self)
-
-        return NotImplemented
-
-    def __mul__(self, num: "te.SupportsIndex") -> "Markup":
-        if isinstance(num, int):
-            return self.__class__(super().__mul__(num))
-
-        return NotImplemented
-
-    __rmul__ = __mul__
-
-    def __mod__(self, arg: t.Any) -> "Markup":
-        if isinstance(arg, tuple):
-            # a tuple of arguments, each wrapped
-            arg = tuple(_MarkupEscapeHelper(x, self.escape) for x in arg)
-        elif hasattr(type(arg), "__getitem__") and not isinstance(arg, str):
-            # a mapping of arguments, wrapped
-            arg = _MarkupEscapeHelper(arg, self.escape)
-        else:
-            # a single argument, wrapped with the helper and a tuple
-            arg = (_MarkupEscapeHelper(arg, self.escape),)
-
-        return self.__class__(super().__mod__(arg))
-
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}({super().__repr__()})"
-
-    def join(self, seq: t.Iterable[t.Union[str, "HasHTML"]]) -> "Markup":
-        return self.__class__(super().join(map(self.escape, seq)))
-
-    join.__doc__ = str.join.__doc__
-
-    def split(  # type: ignore
-        self, sep: t.Optional[str] = None, maxsplit: int = -1
-    ) -> t.List["Markup"]:
-        return [self.__class__(v) for v in super().split(sep, maxsplit)]
-
-    split.__doc__ = str.split.__doc__
-
-    def rsplit(  # type: ignore
-        self, sep: t.Optional[str] = None, maxsplit: int = -1
-    ) -> t.List["Markup"]:
-        return [self.__class__(v) for v in super().rsplit(sep, maxsplit)]
-
-    rsplit.__doc__ = str.rsplit.__doc__
-
-    def splitlines(self, keepends: bool = False) -> t.List["Markup"]:  # type: ignore
-        return [self.__class__(v) for v in super().splitlines(keepends)]
-
-    splitlines.__doc__ = str.splitlines.__doc__
-
-    def unescape(self) -> str:
-        """Convert escaped markup back into a text string. This replaces
-        HTML entities with the characters they represent.
-
-        >>> Markup("Main &raquo; <em>About</em>").unescape()
-        'Main » <em>About</em>'
+        'include' is a sequence of package names to include.  If it's
+        specified, only the named packages will be included.  If it's not
+        specified, all found packages will be included.  'include' can contain
+        shell style wildcard patterns just like 'exclude'.
         """
-        from html import unescape
 
-        return unescape(str(self))
-
-    def striptags(self) -> str:
-        """:meth:`unescape` the markup, remove tags, and normalize
-        whitespace to single spaces.
-
-        >>> Markup("Main &raquo;\t<em>About</em>").striptags()
-        'Main » About'
-        """
-        # Use two regexes to avoid ambiguous matches.
-        value = _strip_comments_re.sub("", self)
-        value = _strip_tags_re.sub("", value)
-        value = " ".join(value.split())
-        return Markup(value).unescape()
+        return list(
+            cls._find_packages_iter(
+                convert_path(where),
+                cls._build_filter('ez_setup', '*__pycache__', *exclude),
+                cls._build_filter(*include),
+            )
+        )
 
     @classmethod
-    def escape(cls, s: t.Any) -> "Markup":
-        """Escape a string. Calls :func:`escape` and ensures that for
-        subclasses the correct type is returned.
+    def _find_packages_iter(cls, where, exclude, include):
         """
-        rv = escape(s)
+        All the packages found in 'where' that pass the 'include' filter, but
+        not the 'exclude' filter.
+        """
+        for root, dirs, files in os.walk(where, followlinks=True):
+            # Copy dirs to iterate over it, then empty dirs.
+            all_dirs = dirs[:]
+            dirs[:] = []
 
-        if rv.__class__ is not cls:
-            return cls(rv)
+            for dir in all_dirs:
+                full_path = os.path.join(root, dir)
+                rel_path = os.path.relpath(full_path, where)
+                package = rel_path.replace(os.path.sep, '.')
 
-        return rv
+                # Skip directory trees that are not valid packages
+                if '.' in dir or not cls._looks_like_package(full_path):
+                    continue
 
-    for method in (
-        "__getitem__",
-        "capitalize",
-        "title",
-        "lower",
-        "upper",
-        "replace",
-        "ljust",
-        "rjust",
-        "lstrip",
-        "rstrip",
-        "center",
-        "strip",
-        "translate",
-        "expandtabs",
-        "swapcase",
-        "zfill",
-    ):
-        locals()[method] = _simple_escaping_wrapper(method)
+                # Should this package be included?
+                if include(package) and not exclude(package):
+                    yield package
 
-    del method
+                # Keep searching subdirectories, as there may be more packages
+                # down there, even if the parent was excluded.
+                dirs.append(dir)
 
-    def partition(self, sep: str) -> t.Tuple["Markup", "Markup", "Markup"]:
-        l, s, r = super().partition(self.escape(sep))
-        cls = self.__class__
-        return cls(l), cls(s), cls(r)
+    @staticmethod
+    def _looks_like_package(path):
+        """Does a directory look like a package?"""
+        return os.path.isfile(os.path.join(path, '__init__.py'))
 
-    def rpartition(self, sep: str) -> t.Tuple["Markup", "Markup", "Markup"]:
-        l, s, r = super().rpartition(self.escape(sep))
-        cls = self.__class__
-        return cls(l), cls(s), cls(r)
-
-    def format(self, *args: t.Any, **kwargs: t.Any) -> "Markup":
-        formatter = EscapeFormatter(self.escape)
-        return self.__class__(formatter.vformat(self, args, kwargs))
-
-    def __html_format__(self, format_spec: str) -> "Markup":
-        if format_spec:
-            raise ValueError("Unsupported format specification for Markup.")
-
-        return self
+    @staticmethod
+    def _build_filter(*patterns):
+        """
+        Given a list of patterns, return a callable that will be true only if
+        the input matches at least one of the patterns.
+        """
+        return lambda name: any(fnmatchcase(name, pat=pat) for pat in patterns)
 
 
-class EscapeFormatter(string.Formatter):
-    __slots__ = ("escape",)
+class PEP420PackageFinder(PackageFinder):
+    @staticmethod
+    def _looks_like_package(path):
+        return True
 
-    def __init__(self, escape: t.Callable[[t.Any], Markup]) -> None:
-        self.escape = escape
-        super().__init__()
 
-    def format_field(self, value: t.Any, format_spec: str) -> str:
-        if hasattr(value, "__html_format__"):
-            rv = value.__html_format__(format_spec)
-        elif hasattr(value, "__html__"):
-            if format_spec:
-                raise ValueError(
-                    f"Format specifier {format_spec} given, but {type(value)} does not"
-                    " define __html_format__. A class that defines __html__ must define"
-                    " __html_format__ to work with format specifiers."
-                )
-            rv = value.__html__()
+find_packages = PackageFinder.find
+find_namespace_packages = PEP420PackageFinder.find
+
+
+def _install_setup_requires(attrs):
+    # Note: do not use `setuptools.Distribution` directly, as
+    # our PEP 517 backend patch `distutils.core.Distribution`.
+    class MinimalDistribution(distutils.core.Distribution):
+        """
+        A minimal version of a distribution for supporting the
+        fetch_build_eggs interface.
+        """
+
+        def __init__(self, attrs):
+            _incl = 'dependency_links', 'setup_requires'
+            filtered = {k: attrs[k] for k in set(_incl) & set(attrs)}
+            distutils.core.Distribution.__init__(self, filtered)
+
+        def finalize_options(self):
+            """
+            Disable finalize_options to avoid building the working set.
+            Ref #2158.
+            """
+
+    dist = MinimalDistribution(attrs)
+
+    # Honor setup.cfg's options.
+    dist.parse_config_files(ignore_option_errors=True)
+    if dist.setup_requires:
+        dist.fetch_build_eggs(dist.setup_requires)
+
+
+def setup(**attrs):
+    # Make sure we have any requirements needed to interpret 'attrs'.
+    logging.configure()
+    _install_setup_requires(attrs)
+    return distutils.core.setup(**attrs)
+
+
+setup.__doc__ = distutils.core.setup.__doc__
+
+
+_Command = monkey.get_unpatched(distutils.core.Command)
+
+
+class Command(_Command):
+    __doc__ = _Command.__doc__
+
+    command_consumes_arguments = False
+
+    def __init__(self, dist, **kw):
+        """
+        Construct the command for dist, updating
+        vars(self) with any keyword parameters.
+        """
+        _Command.__init__(self, dist)
+        vars(self).update(kw)
+
+    def _ensure_stringlike(self, option, what, default=None):
+        val = getattr(self, option)
+        if val is None:
+            setattr(self, option, default)
+            return default
+        elif not isinstance(val, str):
+            raise DistutilsOptionError(
+                "'%s' must be a %s (got `%s`)" % (option, what, val)
+            )
+        return val
+
+    def ensure_string_list(self, option):
+        r"""Ensure that 'option' is a list of strings.  If 'option' is
+        currently a string, we split it either on /,\s*/ or /\s+/, so
+        "foo bar baz", "foo,bar,baz", and "foo,   bar baz" all become
+        ["foo", "bar", "baz"].
+        """
+        val = getattr(self, option)
+        if val is None:
+            return
+        elif isinstance(val, str):
+            setattr(self, option, re.split(r',\s*|\s+', val))
         else:
-            # We need to make sure the format spec is str here as
-            # otherwise the wrong callback methods are invoked.
-            rv = string.Formatter.format_field(self, value, str(format_spec))
-        return str(self.escape(rv))
+            if isinstance(val, list):
+                ok = all(isinstance(v, str) for v in val)
+            else:
+                ok = False
+            if not ok:
+                raise DistutilsOptionError(
+                    "'%s' must be a list of strings (got %r)" % (option, val)
+                )
+
+    def reinitialize_command(self, command, reinit_subcommands=0, **kw):
+        cmd = _Command.reinitialize_command(self, command, reinit_subcommands)
+        vars(cmd).update(kw)
+        return cmd
 
 
-_ListOrDict = t.TypeVar("_ListOrDict", list, dict)
+def _find_all_simple(path):
+    """
+    Find all files under 'path'
+    """
+    results = (
+        os.path.join(base, file)
+        for base, dirs, files in os.walk(path, followlinks=True)
+        for file in files
+    )
+    return filter(os.path.isfile, results)
 
 
-def _escape_argspec(
-    obj: _ListOrDict, iterable: t.Iterable[t.Any], escape: t.Callable[[t.Any], Markup]
-) -> _ListOrDict:
-    """Helper for various string-wrapped functions."""
-    for key, value in iterable:
-        if isinstance(value, str) or hasattr(value, "__html__"):
-            obj[key] = escape(value)
-
-    return obj
-
-
-class _MarkupEscapeHelper:
-    """Helper for :meth:`Markup.__mod__`."""
-
-    __slots__ = ("obj", "escape")
-
-    def __init__(self, obj: t.Any, escape: t.Callable[[t.Any], Markup]) -> None:
-        self.obj = obj
-        self.escape = escape
-
-    def __getitem__(self, item: t.Any) -> "_MarkupEscapeHelper":
-        return _MarkupEscapeHelper(self.obj[item], self.escape)
-
-    def __str__(self) -> str:
-        return str(self.escape(self.obj))
-
-    def __repr__(self) -> str:
-        return str(self.escape(repr(self.obj)))
-
-    def __int__(self) -> int:
-        return int(self.obj)
-
-    def __float__(self) -> float:
-        return float(self.obj)
+def findall(dir=os.curdir):
+    """
+    Find all files under 'dir' and return the list of full filenames.
+    Unless dir is '.', return full filenames with dir prepended.
+    """
+    files = _find_all_simple(dir)
+    if dir == os.curdir:
+        make_rel = functools.partial(os.path.relpath, start=dir)
+        files = map(make_rel, files)
+    return list(files)
 
 
-# circular import
-try:
-    from ._speedups import escape as escape
-    from ._speedups import escape_silent as escape_silent
-    from ._speedups import soft_str as soft_str
-except ImportError:
-    from ._native import escape as escape
-    from ._native import escape_silent as escape_silent  # noqa: F401
-    from ._native import soft_str as soft_str  # noqa: F401
+class sic(str):
+    """Treat this string as-is (https://en.wikipedia.org/wiki/Sic)"""
+
+
+# Apply monkey patches
+monkey.patch_all()
