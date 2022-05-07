@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block head %}
+    <link rel="stylesheet"
+            href="../static/css/super_rare.css">
+{% endblock %}
+{% block content %}
+<div class="container">
+{% for items in slov %}
+    <div class="block">
+        {% for item in items %}
+        <div class="item">
+            <div class="person">
+            <div class="img">
+                <a href="/{{ item['name'] }}"><img src={{ item['url'] }} alt="Бравлер" style="width:200px;">
+                    <div class="name_person">
+                        {{ item['name_r'] }}
+                    </div>
+                </a>
+            </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+{% endfor %}
+</div>
+{% endblock %}

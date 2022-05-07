@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block head %}
+    <link rel="stylesheet"
+            href="../static/css/index.css">
+{% endblock %}
+{% block content %}
+<div class="container">
+    <img src={{ img_href }} alt="Бравлер" style="width:250px;">
+</div>
+<div class="container">
+    {{ description }}
+</div>
+
+<div class="container">
+    <p class="shrift" style="margin-top: 30px;"> Атака:  {{ attack["name"] }}</p>
+</div>
+<div class="container">
+    {{ attack["descr"] }}
+</div>
+
+<div class="container">
+    <p class="shrift" style="margin-top: 30px;"> Супер:  {{ superr['name'] }}</p>
+</div>
+<div class="container">
+    {{ superr["descr"] }}
+</div>
+<div class="container">
+        <p class="shrift" style="margin-top: 30px;">Звездные силы: </p>
+    </div>
+{% for item in amplification %}
+    <div class="container">
+        <p class="shrift" style="margin-top: 30px; margin-left: 40px;">{{ item["name"] }}</p>
+    </div>
+    <div class="container">
+        <p style="margin-left: 40px;">{{ item["descr"] }}</p>
+    </div>
+{% endfor %}
+<div class="container">
+        <p class="shrift" style="margin-top: 30px;">Гаджеты: </p>
+    </div>
+{% for item in gadget %}
+    <div class="container">
+        <p class="shrift" style="margin-top: 30px; margin-left: 40px;">{{ item["name"] }}</p>
+    </div>
+    <div class="container">
+        <p style="margin-left: 40px;">{{ item["descr"] }}</p>
+    </div>
+{% endfor %}
+{% endblock %}

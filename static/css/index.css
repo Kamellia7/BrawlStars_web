@@ -1,0 +1,9 @@
+body {
+    background: -webkit-linear-gradient(270deg, rgb(68, 242, 131), rgb(116, 173, 238));
+    background: -moz-linear-gradient(270deg, rgb(68, 242, 131), rgb(116, 173, 238));
+    background: linear-gradient(270deg, rgb(68, 242, 131), rgb(116, 173, 238));
+    font-family: 'Montserrat', sans-serif;
+    font-size: 20px;
+    line-height: 1.6;
+    color: #333;
+}
